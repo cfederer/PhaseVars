@@ -1,0 +1,89 @@
+
+/**
+ * 
+ * @author cfederer
+ *
+ */
+public class Variant {
+	private int location;
+	private char alt; 
+	private String chrom;
+	String filter; 
+	String sample;
+	
+	public Variant(int aLocation, char anAlt, String aChrom){
+		location = aLocation;
+		alt = anAlt; 
+		chrom = aChrom;
+	}
+	
+	public Variant(int aLocation, char anAlt, String aChrom, String aFilter, String aSample){
+		location = aLocation;
+		alt = anAlt; 
+		chrom = aChrom;
+		filter = aFilter; 
+		sample = aSample; 
+	}
+	
+	public String getSample(){
+		return sample; 
+	}
+	public String getFlag(){
+		return filter; 
+	}
+	
+	public int getLocation(){
+		return location;
+	}
+	
+	public char getAlt(){
+		return alt; 
+	}
+	
+	public String getChrom(){
+		return chrom; 
+	}
+	
+	public boolean equalsWithoutSample(final Object obj){
+		  if (this == obj)
+	            return true;
+	        if (obj == null)
+	            return false;
+	        if (getClass() != obj.getClass())
+	            return false;
+	        final Variant other = (Variant) obj;
+	        if (!(location==other.location))
+	            return false;
+	        if(!(alt==other.alt)){
+	        	return false; 
+	        }
+	        if(!(chrom.equals(other.chrom))){
+	        	return false; 
+	        }
+	        return true;
+	}
+	
+	@Override
+    public boolean equals(final Object obj) {
+        if (this == obj)
+            return true;
+        if (obj == null)
+            return false;
+        if (getClass() != obj.getClass())
+            return false;
+        final Variant other = (Variant) obj;
+        if (!(location==other.location))
+            return false;
+        if(!(alt==other.alt)){
+        	return false; 
+        }
+        if(!(chrom.equals(other.chrom))){
+        	return false; 
+        }
+        if(!(sample.equals(other.sample))){
+        	return false; 
+        }
+        return true;
+    }
+
+}
