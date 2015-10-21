@@ -1,0 +1,51 @@
+import htsjdk.samtools.SAMRecord;
+
+import java.util.ArrayList;
+
+
+public class PhasedContainer implements Cloneable{
+	private ArrayList<Variant> varList; 
+	private ArrayList<SAMRecord> readList; 
+	public PhasedContainer(Variant holder1, Variant holder2){
+		varList = new ArrayList<Variant>();
+		varList.add(holder1);
+		varList.add(holder2); 
+		readList = new ArrayList<SAMRecord>(); 
+	}
+	
+    private PhasedContainer(Variant holder1, Variant holder2, ArrayList<SAMRecord> aList){
+		varList = new ArrayList<Variant>();
+		varList.add(holder1);
+		varList.add(holder2); 
+		readList = aList;  
+	}
+	
+	public void addToVarList(Variant aholder){
+		varList.add(aholder); 
+	}
+	
+	public void addToReadList(SAMRecord aPhased){
+		readList.add(aPhased); 
+	}
+	
+	private Variant getHolderA(){
+		return varList.get(0);
+	}
+	
+	private Variant getHolderB(){
+		return varList.get(1);
+	}
+	
+	public ArrayList<SAMRecord> getReadList(){
+		return readList; 
+	}
+	
+	public ArrayList<Variant> getVarList(){
+		return varList; 
+	}
+	
+	public Object clone(){
+		PhasedContainer container = new PhasedContainer(this.getHolderA(), this.getHolderB(), this.getReadList());
+		return container; 
+	}
+}
