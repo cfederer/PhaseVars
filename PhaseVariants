@@ -1,0 +1,1076 @@
+import java.io.File;
+import java.io.PrintWriter;
+
+import org.apache.commons.cli.BasicParser;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+
+import java.io.IOException;
+
+import htsjdk.samtools.SAMFormatException;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMRecordIterator;
+import htsjdk.samtools.SamReader;
+import htsjdk.samtools.SamReaderFactory;
+import htsjdk.tribble.AbstractFeatureReader;
+import htsjdk.tribble.FeatureReader;
+import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.Genotype;
+import htsjdk.variant.variantcontext.GenotypesContext;
+import htsjdk.variant.variantcontext.VariantContext;
+import htsjdk.variant.vcf.VCFCodec;
+
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+import java.util.Scanner;
+import java.util.Set;
+
+
+/**
+ * This is a computer science undergrad's attempt to write a program to phase
+ * variants. Here's how to potentially make use out of it: 
+ * 
+ * Not every parameter is needed to run the code; however the perl wrapper 
+ * will require all parameters to be included. Please type "null"
+ * for any parameter not needed.
+ * 
+ * 
+ * Arguments required to run tool:
+ * 
+ * option1:
+ *  -c the command of interest: "C" to check for specific variants -b the
+ * bam file  -chr the chromosome -l the
+ * locations and alternate alleles with no spaces
+ * Must give one single chromosome value 
+ * ex: java PhaseVariants.java -c C -l 87727024T87727026G -b bam.file -R f -s null -f null -m null
+ * 
+ * option2: 
+ * -c the command of interest: "B" to find variants in phase given VCF file
+ * also requires argument -f the VCF file 
+ * ex: java PhaseVariants.java -c B -f vars.vcf -b bam.file -R IF -s sample -m null -l null
+ * 
+ * optional params: 
+ * -m change the MAX_DISTANCE between locations of variants in order to check that they're in
+ * phase. set at 800 otherwise in order to not change the MAX_DISTANCE, enter -m
+ * null or -m 800 
+ * 
+ * -R to allow failed variants to be phased with passed ones 
+ * "true" to allow all variants passed or failed
+ * "IF" to allow passed and intersection failed VCFs
+ * only passed ones considered otherwise 
+ * 
+ * -s the sample name in the VCF of variants to consider
+ *  -s sample name to include; if you're unsure or your bam file
+ * has multiple sample names type -s null and all sample names in the VCF will
+ * be considered
+ * 
+ * -p if you want to print out the reads that contain the phased variants. The reads
+ * printed out are any reads that contain at least 2 of the variants, not necessarily all
+ * variants in phase. Command param: "no", "N", "false", "F" to not print reads
+ * 
+ * example: to find variants in phase for chr5 for any sample using
+ * IntersectionFailed VCFs 
+ * --f /gscuser/cfederer/Documents/mysnvs.vcf --b
+ * /gscmnt/sata170/info/medseq/3eb9beb39bed412db1ed24e9a4e0c6fc/chr5.bam --chr 5
+ * --c B -R true -l null -s null -m null -p y
+ * 
+ * When using the "C" check command, you can enter 'D' or 'I' to check for insertions and deletions. 
+ * For deletion, the location is the location where the deletion occurs (no change needed). For insertion,
+ * the location is the location to the right of the insertion. 
+ * example:
+ * 238(I)239 Where(I) is an insertion between spot 238 and 239, type the var as: 239I 
+ * 
+ * In order to run entire genome - just type "all" for chr field and be prepared to wait a minute...(or 60)
+ * 
+ * @author cfederer e mail: calliefederer@gmail.com
+ * 
+ */
+public class PhaseVariants {
+	private static int MAX_DISTANCE = 800;
+	
+	// contains the PhasedContainers which hold lists of variants and SAMRecords in phase.
+	private static ArrayList<PhasedContainer> PhasedListContainer = new ArrayList<PhasedContainer>();
+	
+	// contains failed variants - global so createList can add to list and return variantList
+	private static ArrayList<Variant> variantListFailed = new ArrayList<Variant>();
+	
+	//bam file from user input required in all uses of tool 
+	private static String bamFile;
+	
+	//chromosomes list, potentially changed by createList
+	private static ArrayList<String> chromosomes = new ArrayList<String>(); 
+	
+	//SamReaders
+	private static SamReader reader;
+	private static SamReader reader2; 
+	
+
+	@SuppressWarnings("unchecked")
+	public static void main(String[] args) throws IOException, ParseException {
+		
+		// command line input variables
+		String command = null;
+		String vars = null;
+		String vcfFile = null;
+		String chr = "all"; 
+		String allowedFilters = "passed"; 
+		String sample = "no sample";
+		boolean printReads = true; 
+		String outFile = null; 
+		
+		
+		// holds variants from VCF or user input
+		ArrayList<Variant> variantList = new ArrayList<Variant>();
+
+		// for user input if any required commands not given
+		Scanner scanner = new Scanner(System.in);
+		
+		// to work with VCF files
+		final VCFCodec vcfCodec = new VCFCodec(); // Latest VCF format 4.1
+
+		// initialize command line options
+		Options options = new Options();
+		options.addOption("m", true, "Max Distance between locations"); 
+		options.addOption("c", true, "Command"); 
+		options.addOption("f", true, "VCF File"); 
+		options.addOption("b", true, "Bam File"); 
+		options.addOption("chr", true, "Chromosome"); 
+		options.addOption("l", true, "Variants"); 
+		options.addOption("R", true, "Relax filters");
+		options.addOption("s", true, "Sample name");
+		options.addOption("p", true, "Print reads?"); 
+		options.addOption("o", true, "output file "); 
+
+		// Parse the user-input
+		CommandLineParser parser = new BasicParser();
+		CommandLine commandLine = parser.parse(options, args);
+
+		// if no arguments given, print out help message
+		if (commandLine.getOptions().length == 0 || commandLine.hasOption('h')
+				|| commandLine.hasOption("help")) {
+			System.out.println("Parameters to run tool: ");
+			System.out.println(" --b the bam file"); 
+			System.out.println(" --c the command: C to check specific variants, B to build from VCF ");
+			System.out.println(" --chr the chromosome of interest, 'all' to sequence entire genome ");
+			System.out.println(" --f the vcf file or --l the variants to check in format 100000A20000B");
+			System.out.println(" --m to change max distance between two variants to check if in phase, currently set to 800");
+			System.out.println(" --s the sample name if known");
+			System.out.println(" --R true to check failed variants from VCF; IF to check IntersectionFailed variants ");
+			System.out.println(" --p false to not print out reads that contain phased variants "); 
+		}
+		
+		//print reads or not, yes if not indicated otherwise 
+		if(commandLine.hasOption("p")){
+			String check = commandLine.getOptionValue("p");
+			check = check.toLowerCase(); 
+			if((check.equals("no")) || (check.equals("false")) || (check.equals("f")) ||
+					(check.equals("n"))){
+				printReads = false; 
+			}
+		}
+
+		// chromosome
+		if (commandLine.hasOption("chr")) {
+			String check = commandLine.getOptionValue("chr");
+				chr = check; 
+			} 
+	
+		// c the command - either B to build from VCF or C to check specific variants
+		if (commandLine.hasOption("c")) {
+			String check = commandLine.getOptionValue("c");
+			if (!(check.equals("null"))) {
+				command = check;
+			} else {
+				System.out
+						.println("Please enter the command 'C' to check specific Variants");
+				System.out.println("'B' to build from a vcf file");
+				command = scanner.nextLine();
+			}
+		}
+		// user input for "C" command())
+		if ((command.equals("C")) && (commandLine.hasOption("l"))) {
+			String check = commandLine.getOptionValue("l");
+			if (!(check.equals("null"))) {
+				vars = check;
+				while (vars.length() > 0) {
+					int loc = findLocation(vars);
+					char var = findFirstChar(vars);
+					System.out.println("variant: " + " " + loc + " " + var);
+					Variant hold = new Variant(loc, var, chr, "n/a", sample);
+					variantList.add(hold);
+					vars = vars.substring(vars.indexOf(var) + 1, vars.length());
+				}
+			} else {
+				System.out.println("variants: " + vars); 
+			}
+		}
+
+		// m to change MAX_DISTANCE between variant locations to determine if
+		// reasonably close
+		if (commandLine.hasOption("m")) {
+			String check = commandLine.getOptionValue("m");
+			if (!(check.equals("null"))) {
+				MAX_DISTANCE = findLocation(check);
+			}
+		}
+	
+		//sample name 
+		if (commandLine.hasOption("s")) {
+			String check = commandLine.getOptionValue("s");
+			if ((!(check.equals("null"))) && (!(check.equals("none"))) && (!(check.equals("no sample")))) {
+				sample = commandLine.getOptionValue("s");
+			}
+		}
+
+		// vcf file - needed for command B
+		if (commandLine.hasOption("f")) {
+			vcfFile = commandLine.getOptionValue("f");
+		}
+		
+		// command B requires VCF file, command C requires variants
+		if ((command.equals("B")) && ((vcfFile == null) || (!isVCF(new File(vcfFile))))) {
+			System.out
+					.println("A VCF file is needed to find Variants in phase with command 'B' ");
+			System.out
+					.println("Please type a valid VCF file to use, or type 'C' to change the command to check specific variants");
+			String userInput = scanner.nextLine();
+			if (userInput.equals("C")) {
+				command = "C";
+			} else {
+				vcfFile = userInput;
+			}
+		} else if ((command.equals("C")) && (vars == null)) {
+			System.out.println("Please enter Variants to phase");
+			System.out.println("Enter location type '0' to stop input");
+			int check = scanner.nextInt();
+			while (!(check == 0)) {
+				int loc = check;
+				System.out.println("Enter var ");
+				String varS = scanner.next();
+				char var = varS.charAt(0);
+				Variant hold = new Variant(loc, var, chr, "n/a", sample);
+				variantList.add(hold);
+				System.out.println("Enter location type '0' to stop input");
+				check = scanner.nextInt();
+			}
+		}
+
+		// bamfile
+		if (commandLine.hasOption("b")) {
+			String check = commandLine.getOptionValue("b");
+			if ((!(check.equals("null"))) && (isBam(new File(check)))) {
+				bamFile = check;
+			} else {
+				System.out.println("Bamfile required. Please enter a bamfile location");
+				bamFile = scanner.nextLine();
+			}
+		}
+
+		// to determine quality of filter desired by user to phase passed variants
+		if (commandLine.hasOption("R")) {
+			String check = commandLine.getOptionValue("R");
+			check.toLowerCase(); 
+			if ((check.equals("true")) || (check.equals("y")) || (check.equals("yes")) ||
+					 (check.equals("t"))) {
+				allowedFilters = "failed";
+			} else if((check.equals("IF")) || (check.equals("if")) || (check.equals("If")) || (check.equals("iF"))){
+				allowedFilters = "IF"; 
+			}
+		}
+		
+		if(commandLine.hasOption("o")){
+			String check = commandLine.getOptionValue("o"); 
+			if(!check.equals("null")){
+				outFile = check;
+			} else {
+				System.out.println("Please supply output file ");
+				outFile = scanner.nextLine(); 
+			}
+		}
+		
+		// output params entered 
+		System.out.println("Arguments: "); 
+		System.out.println("command: " + command);
+		System.out.println("bam file: " + bamFile);
+		System.out.println("max distance: " + MAX_DISTANCE);
+		System.out.print("chromosome: " + chr); 
+		System.out.println(); 
+		System.out.println("vcf file: " + vcfFile);
+		System.out.println("allowed filters? " + allowedFilters);
+		System.out.println("sample: " + sample);
+		System.out.println("print reads? " + printReads); 
+		System.out.println("output file: " + outFile); 
+		System.out.println(); 
+		
+		// reader2 needed to search for mate records
+		reader2 = SamReaderFactory.makeDefault().open(new File(bamFile));
+		
+		// working with VCF 
+		if (command.equals("B")) {
+			//warnings
+			if (isGzipped(new File(vcfFile))) {
+				System.out.println("Sometimes doens't work with vcf.gz files");
+				System.out.println("If an exception is thrown, try and gunzip the vcf file and run again ");
+			}
+			
+			//set up VCF 
+			FeatureReader<VariantContext> varReader = AbstractFeatureReader
+					.getFeatureReader(vcfFile, vcfCodec, false);
+			varReader.getHeader();
+			if(chr.equals("all")){
+				for (VariantContext variant : varReader.iterator()) {
+					if(!chromosomes.contains(variant.getChr())){
+						chromosomes.add(variant.getChr()); 
+					}
+				}
+			}
+			//create variant list 
+			variantList = createList(varReader, allowedFilters, sample, chr);
+		}
+
+		// print out passed vars list size 
+		System.out.println("Total number of variants: " + variantList.size());
+		System.out.println(); 
+
+		// print out size of failed variantslist 
+		if(!allowedFilters.equals("passed")){
+			System.out.println("number of " + allowedFilters + " variants: "
+					+ variantListFailed.size());
+		}
+
+		//holds all vars so passed vars can iterate with each possible combo
+		ArrayList<Variant> variantListAll = new ArrayList<Variant>();
+		variantListAll= (ArrayList<Variant>) variantList.clone(); 
+		variantListAll.addAll(variantListFailed); 
+		
+	 
+		
+		//iterate through variant lists cut by chr to make run more efficiently 
+		//would utilize parallel processing skills here if I had any 
+		if(chr.equals("all")){
+			double percentComplete = 0; 
+			Calendar calendar = Calendar.getInstance();
+			int hour = calendar.get(Calendar.HOUR_OF_DAY);
+			int minute = calendar.get(Calendar.MINUTE);
+			int second = calendar.get(Calendar.SECOND);
+			System.out.printf("Time: %02d:%02d:%02d\n", hour, minute, second);
+			System.out.printf("percent complete: %.2f\n", percentComplete);
+			System.out.println();
+			for(int i = 0; i < chromosomes.size(); i ++){
+				ArrayList<Variant> variantsByChromosome = new ArrayList<Variant>();
+				ArrayList<Variant> variantsAllByChromosome = new ArrayList<Variant>();
+				for(Variant var : variantList){
+					if(var.getChrom().equals(chromosomes.get(i))){
+						variantsByChromosome.add(var); 		
+					} 
+				}
+				variantsAllByChromosome= (ArrayList<Variant>) variantsByChromosome.clone();
+				if(!allowedFilters.equals("passed")){
+					for(Variant var: variantListFailed){
+						if(var.getChrom().equals(chromosomes.get(i))){
+							variantsAllByChromosome.add(var); 
+						}
+					}
+				}
+				System.out.println("checking chromosome: " + chromosomes.get(i) + "; number of variants: " + variantsByChromosome.size()); 
+				iteratePhase(variantsByChromosome,variantsAllByChromosome,bamFile,printReads); 
+				System.out.println(); 
+				// time & percentage update
+				calendar = Calendar.getInstance();
+				hour = calendar.get(Calendar.HOUR_OF_DAY);
+				minute = calendar.get(Calendar.MINUTE);
+				second = calendar.get(Calendar.SECOND);
+				System.out.printf("Time: %02d:%02d:%02d\n", hour, minute, second);
+				percentComplete += 100 * ((double) variantsByChromosome.size() / (double) variantList.size());
+				System.out.printf("percent complete: %.2f\n", percentComplete);
+				System.out.println();
+			}
+		} else {
+			//if just one chromosome, just call on variant list 
+			iteratePhase(variantList, variantListAll, bamFile, printReads); 
+		}
+		
+
+		// if a variant is in two PhasedContainers, merge together
+		for (int i = 0; i < PhasedListContainer.size(); i++) {
+			for (int j = i + 1; j < PhasedListContainer.size(); j++) {
+				for (Variant hold : PhasedListContainer.get(i).getVarList()) {
+					if (PhasedListContainer.get(j).getVarList().contains(hold)) {
+						merge(i, j);
+						// merge removes item at spot j, must check through
+						// again
+						i = 0;
+						j = 0;
+						break;
+					}
+				}
+			}
+		}
+		
+		//if a record is in two containers, merge 
+		for (int i = 0; i < PhasedListContainer.size(); i++) {
+			for (int j = i + 1; j < PhasedListContainer.size(); j++) {
+				for (SAMRecord record : PhasedListContainer.get(i)
+						.getReadList()) {
+					if (PhasedListContainer.get(j).getReadList()
+							.contains(record)) {
+						merge(i, j);
+						// merge removes item at spot j, must check through
+						// again
+						i = 0;
+						j = 0;
+						break;
+					}
+				}
+			}
+		}
+
+		@SuppressWarnings("resource")
+		PrintWriter writer = new PrintWriter(outFile); 
+		// output params entered 
+		writer.println("Arguments: "); 
+		writer.println("command: " + command);
+		writer.println("bam file: " + bamFile);
+		writer.println("max distance: " + MAX_DISTANCE);
+		writer.print("chromosome: " + chr); 
+		writer.println(); 
+		writer.println("vcf file: " + vcfFile);
+		writer.println("allowed filters? " + allowedFilters);
+		writer.println("sample: " + sample);
+		writer.println("print reads? " + printReads); 
+		writer.println("output file: " + outFile); 
+		writer.println(); 
+		
+		// print out PhasedListContainer items
+		if(PhasedListContainer.size()==0){
+			writer.println("No variants were found in phase"); 
+		} else{
+			for (PhasedContainer aContainer : PhasedListContainer) {
+				boolean sameLocation = false; 
+				writer.println("Variants in phase: ");
+				ArrayList<Integer> locations = new ArrayList<Integer>(); 
+				for (Variant hold : aContainer.getVarList()) {
+					if(locations.contains(hold.getLocation())){
+						 sameLocation = true; 
+					}
+					locations.add(hold.getLocation()); 
+					writer.println(hold.getChrom() + " " + hold.getLocation() + " " + hold.getAlt()
+							+ " " + hold.getFlag() + " " + hold.getSample());
+				} 
+				//print out warning statement if same location found
+				if(sameLocation){
+					writer.println("Same location found in multiple variants. Please review results ");
+					writer.println("Might be from duplicate sample names "); 
+				}
+				//output reads if user indicated to do so 
+				if(printReads){
+					writer.println("Reads that contain variants: ");
+					for (SAMRecord record : aContainer.getReadList()) {
+						writer.println(record);
+					}
+				}
+				writer.println(); 
+			}
+		}
+		System.out.println("Complete"); 
+		writer.close(); 
+
+	}			
+	
+	/**
+	 * Allows clips of variant lists to be used to iterate through in order to 
+	 * efficiently work with entire genome. 
+	 * @param variantList the variant list 
+	 * @param variantListAll the variant list with failed variants as well if user indicated
+	 * @param bamFile the bam file string 
+	 * @param printReads if the user wants print reads or not 
+	 * @param all if all chromosomes are used, percentage updates not printed if so 
+	 * @throws IOException
+	 */
+	private static void iteratePhase(ArrayList<Variant> variantList, ArrayList<Variant> variantListAll, String bamFile, boolean printReads) throws IOException{
+		// loop to iterate through variants to find if in phase
+				for (int i = 0; i < (variantList.size()); i++) {
+					for (int j = i + 1; j < variantListAll.size(); j++) {
+						// check if locations of VCFs are reasonable to be in phase
+						//if within max_distance, if from same sample, if not same variant (occasional duplicates)
+						if ((Math.abs(variantList.get(i).getLocation()
+								- variantListAll.get(j).getLocation()) <= MAX_DISTANCE)
+								&& (variantList.get(i).getSample().equals(variantListAll.get(j)
+										.getSample())) && (!variantList.get(i).equalsWithoutSample(variantList.get(j)))) {
+							// open reader with user input
+							//System.out.println("loc1: " + variantList.get(i).getLocation() + " loc2: " + variantList.get(j).getLocation()); 
+							reader = SamReaderFactory.makeDefault().open(
+									new File(bamFile));
+							// checks if two variants in phase, returns object containing
+							// both variants or null otherwise
+							inPhase(reader, reader2,
+									variantList.get(i), variantListAll.get(j), variantList.get(i).getChrom(), printReads);
+						}
+					}
+				}
+	}
+	/**
+	 * Returns true if file has a .gz extension
+	 * 
+	 * @param file
+	 * @return
+	 */
+	private static boolean isGzipped(File file) {
+		return file.getName().endsWith(".gz");
+	}
+	
+	/**
+	 * Returnst rue if file has .vcf extension 
+	 * 
+	 * @param file
+	 * @return
+	 */
+	private static boolean isVCF(File file){
+		return file.getName().endsWith(".vcf"); 
+	}
+	
+	/**
+	 * Returns true if file has .bam extension
+	 * 
+	 * @param file
+	 * @return
+	 */
+	private static boolean isBam(File file){
+		return file.getName().endsWith(".bam"); 
+	}
+
+	/**
+	 * Given a FeatureReader<VariantContext> varReader, will create a list that
+	 * holds the location, alternate allele, filter, chr and sample of a variant. 
+	 * @author Callie Federer
+	 * @param varReader
+	 *            to read VCF file
+	 * @param chrom
+	 *            the chromosome of interest from user input
+	 * @param allowedFilters
+	 * 			  filters of variants to be added to lists
+	 * @param sample 
+	 * 			the sample name to be included with variant info 
+	 * @return an array list that holds Variant with alternate allele and it's
+	 *         location and chromosome
+	 */
+	static ArrayList<Variant> createList(
+			FeatureReader<VariantContext> varReader,
+			String allowedFilters, String sample, String chr) throws IOException {
+		System.out.println("Creating list of variants..."); 
+		System.out.println(); 
+		//holds variants 
+		ArrayList<Variant> variantList = new ArrayList<Variant>();
+			for (VariantContext variant : varReader.iterator()) {
+				//reset flag values 
+				//System.out.println("chromosome: " + chromosomes.get(i) + " var chr: " + variant.getChr()); 
+				boolean passed = true;
+				boolean intFailure = false;
+
+				//to find filters 
+				GenotypesContext genotypes = variant.getGenotypes();
+
+				for (Genotype genotype : genotypes) {
+					if (genotype.getFilters() != null) {
+						passed = false;
+						if (genotype.getFilters().equals("IntersectionFailure")) {
+							intFailure = true;
+						}
+					}
+				}
+				//if any sample to be considered 
+				if (!(sample.equals("no sample"))) {
+					if (passed) {
+						System.out.println("chr: " + chr + " variant.getChr " + variant.getChr());
+						if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+							ArrayList<Variant> variants = createListHelper(sample, variant,
+									"passed");
+							for(Variant var : variants){
+								if(!variantList.contains(var)){
+									variantList.add(var);
+								}
+							}
+						}
+					} else if ((allowedFilters.equals("IF")) && (intFailure)) {
+						if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+							ArrayList<Variant> variants = createListHelper(sample, variant,
+									"IF");
+							for(Variant var : variants){
+								if(!variantListFailed.contains(var)){
+									variantListFailed.add(var);
+								}
+							}
+						}
+					} else if(allowedFilters.equals("failed")){
+						if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+							ArrayList<Variant> variants = createListHelper(sample, variant,
+									"failed");
+							for(Variant var : variants){
+								if(!variantListFailed.contains(var)){
+									variantListFailed.add(var);
+								}
+							}
+						}	
+					}	 
+				} else {
+					Set<String> sampleSet = variant.getSampleNames();
+					Object[] samples = sampleSet.toArray();
+					for (int j = 0; j < samples.length; j++) {
+						if (passed) {
+							if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+								ArrayList<Variant> variants = createListHelper(
+										(String) (samples[j]), variant, "passed");
+								for(Variant var : variants){
+									if(!variantList.contains(var)){
+										variantList.add(var);
+									}
+								}
+							}
+						} else if ((allowedFilters.equals("IF")) && (intFailure)) {
+							if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+								ArrayList<Variant> variants = createListHelper(
+										(String) (samples[j]), variant, "IF");
+								for(Variant var : variants){
+									if(!variantListFailed.contains(var)){
+										variantListFailed.add(var);
+									}
+								}
+							}
+						} else if (allowedFilters.equals("failed")){
+							if((chr.equals("all")) || (chr.equals(variant.getChr()))){
+								ArrayList<Variant> variants = createListHelper(
+										(String) (samples[j]), variant, "failed");
+								for(Variant var : variants){
+									if(!variantListFailed.contains(var)){
+										variantListFailed.add(var);
+									}
+								}
+							}	
+						} 
+					}
+				}
+		}
+		
+		
+		return variantList;
+	}
+		
+	/**
+	 * Creates a Variant to add to varList. Finds the alternate allele
+	 * based on the given sample. 
+	 * @param sample sample name
+	 * @param variant 
+	 * @param filter filter of the variant
+	 * @return Variant the variant 
+	 */
+	private static ArrayList<Variant> createListHelper(String sample,
+			VariantContext variant, String filter) {
+		ArrayList<Variant> variants = new ArrayList<Variant>(); 
+		String chr = variant.getChr();
+		int loc = variant.getStart();
+		//get allele from sample 
+		Genotype genotypes_sample = variant.getGenotype(sample);
+		// alleles = variant.getAlternateAlleles();
+		List<Allele> alleles_sample = genotypes_sample.getAlleles();
+		for (Allele allele : alleles_sample) {
+			if (!allele.isReference()) {
+				String vars = allele.getBaseString();
+				for(int i = 0; i < vars.length(); i++){
+					Variant var = new Variant(loc, vars.charAt(i), chr, filter, sample);
+					variants.add(var); 
+				}
+			}
+		}
+		return variants; 
+	}
+
+	/**
+	 * Determines if the Record contains the variant at the location of interest
+	 * 
+	 * @param reader
+	 *            the SamReader
+	 * @param var
+	 *            the variant of interest
+	 * @param location
+	 *            the location of the variant
+	 * @return if SAMRecord has variant at location
+	 */
+	private static boolean hasVariant(SAMRecord aRecord, int location, char var) {
+		//get reads 
+		byte[] nucleotides = aRecord.getReadBases();
+		//find original location of interest 
+		int arrayLoc = location - aRecord.getAlignmentStart();
+		//use cigar to check if any insertions/deletions/clippings that would affect 
+		String cigar = aRecord.getCigarString(); 
+		//call adjustment 
+		arrayLoc += locationAdjustment(cigar, arrayLoc, var);
+		char base; 
+		//locationAdjustment returns 101 if deletion 
+		if (arrayLoc > 100) {
+			//var is deletion
+			base = 'D'; 
+		//locationAdjustment returns -101 if insertion 
+		} else if(arrayLoc < 0 ){
+			//var is insertion
+			base = 'I';  
+		} else {
+			base = (char) (nucleotides[arrayLoc]);
+		}
+		if (base == var) {
+			return true;
+		}
+		return false;
+	}
+	
+	/**
+	 * Check if SAMRecord contains location. Must run inBounds check before
+	 * checking for variant to prevent out of bounds exception.
+	 * 
+	 * @param aRecord
+	 *            the SAMRecord of interest
+	 * @param location
+	 *            the position of interest
+	 * @return if SAMRecord contains location
+	 */
+	private static boolean inBounds(SAMRecord aRecord, int location) {
+		//System.out.println(aRecord); 
+		//System.out.println(aRecord.getAlignmentEnd());
+		//System.out.println(aRecord.getAlignmentStart()); 
+		try {
+			if (aRecord.getAlignmentStart() <= location
+					&& aRecord.getAlignmentEnd() >= location) {
+				return true;
+			}
+		} catch (NullPointerException e) {
+			//System.err.println("Caught NullPointerException: " + e.getMessage());
+		}
+		return false;
+	}
+
+	/**
+	 * inPhase will determine if two given variants are in phase by checking if the two
+	 * variants are on the same read or read pair. 
+	 * 
+	 * @param reader
+	 *            a reader to iterate through SAMrecords
+	 * @param reader2
+	 *            a reader to find the mate record
+	 * @param hold1 a variant
+	 * @param hold2 a variant
+	 * @param collectReads if not collectingReads, can return after finding one read that phases
+	 * 		   two variants, otherwise will continue and find all reads that contain phased variants
+	 * @throws IOException
+	 * @return if an item was added or not 
+	 */
+	private static boolean inPhase(SamReader reader, SamReader reader2,
+			Variant hold1, Variant hold2, String chr, boolean collectReads) throws IOException {
+		boolean itemAdded = false;  
+		SAMRecordIterator iter = null; 
+		try { 
+			iter = reader.queryOverlapping(chr, hold1.getLocation()-1000,hold2.getLocation()+1000); 
+			while(iter.hasNext()){
+				SAMRecord samRecord = iter.next();  
+				// only go through checks if samRecord in bounds
+				// for at least one of the variants
+				if ((inBounds(samRecord, hold1.getLocation()))
+						|| (inBounds(samRecord, hold2.getLocation()))) {
+					// if SamRecord contains both variants, in phase 
+					// add to PhasedListContainer
+					if ((inBounds(samRecord, hold1.getLocation()) && (hasVariant(
+							samRecord, hold1.getLocation(), hold1.getAlt())))
+							&& ((inBounds(samRecord, hold2.getLocation())) && (hasVariant(
+									samRecord, hold2.getLocation(),
+									hold2.getAlt())))) {
+						PhasedContainer container = new PhasedContainer(hold1,
+								hold2);
+						container.addToReadList(samRecord);
+						PhasedListContainer.add(container); 
+						itemAdded = true; 
+						if(!collectReads){
+							return itemAdded; 
+						}
+					// if samRecord has loc1 and var1 or loc2 and var2,
+					// check the mate combinations 
+					} else if ((inBounds(samRecord, hold1.getLocation()) && (hasVariant(
+							samRecord, hold1.getLocation(), hold1.getAlt())))
+							|| (inBounds(samRecord, hold2.getLocation()) && (hasVariant(
+									samRecord, hold2.getLocation(),
+									hold2.getAlt())))) {
+						SAMRecord mateRecord = reader2.queryMate(samRecord);
+						//if record has var1 and mate has var2, in phase 
+						if ((inBounds(samRecord, hold1.getLocation()) && (hasVariant(
+								samRecord, hold1.getLocation(), hold1.getAlt())))
+								&& ((inBounds(mateRecord, hold2.getLocation())) && (hasVariant(
+										mateRecord, hold2.getLocation(),
+										hold2.getAlt())))) {
+							PhasedContainer container = new PhasedContainer(
+									hold1, hold2);
+							container.addToReadList(samRecord);
+							PhasedListContainer.add(container); 
+							itemAdded = true; 
+							if(!collectReads){
+								return itemAdded; 
+							}
+						//if record has var2 and mate has var1, in phase 
+						} else if ((inBounds(samRecord, hold2.getLocation()) && (hasVariant(
+								samRecord, hold2.getLocation(), hold2.getAlt())))
+								&& ((inBounds(mateRecord, hold1.getLocation())) && (hasVariant(
+										mateRecord, hold1.getLocation(),
+										hold1.getAlt())))) {
+							PhasedContainer container = new PhasedContainer(
+									hold1, hold2);
+							container.addToReadList(samRecord);
+							PhasedListContainer.add(container);
+							itemAdded = true; 
+							if(!collectReads){
+								return itemAdded; 
+							}
+						}
+					}
+				}
+
+			}
+		} catch (SAMFormatException e) {
+			//System.err.println("Caught IOException: " + e.getMessage());
+		}
+
+		// must close to prevent iterator exception
+		reader.close();
+		if(iter!=null){
+			iter.close();
+		}
+		return itemAdded; 			
+
+	}
+
+	
+	/**
+	 * Parses through a string representation of a cigar and determines if the
+	 * location of the base in the sequence of a particular read needs to be
+	 * adjusted to match the base in the position because of insertions or
+	 * deletions. Only checks for M, I, S and D in cigar. If other items affect
+	 * position in cigar string, these will need to be accounted for
+	 * 
+	 * @param cigar
+	 *            the string representation of a cigar
+	 * @param originalLocation
+	 *            expected 0-based spot in string of allele of interest before adjustment 
+	 * @return
+	 */
+	private static int locationAdjustment(String cigar, int originalLocation, char var) {
+		// controls adjustment in string location 
+		ArrayList<Integer> deletionRanges = new ArrayList<Integer>(); 
+		ArrayList<Integer> insertionRanges = new ArrayList<Integer>();
+		int adjustment = 0;
+		// to make sure adjustment only accounted for if
+		// position of interest affected by insertions or deletions
+		//-1 to account for 0 based array 
+		int currentLocation = -1; 
+		// no adjustment needed for these cigars
+		if (cigar.equals("100M")) {
+			return adjustment;
+		}
+		//finds deletion spots on read
+		if(cigar.contains("D")){
+			deletionRanges = findRange('D', cigar); 
+		} 
+		//find insertion spots on read 
+		if(cigar.contains("I")){
+			insertionRanges = findRange('I', cigar); 
+		}
+
+		// while position of interest not surpassed & cigar string not empty
+		while ((currentLocation < originalLocation) && (cigar.length() > 0)) {
+			// find value of cigar character 
+			int cigarValue = findLocation(cigar);
+			// if M is the next character, no adjustments need to be made
+			// update the local incrementer
+			if (nextChar(cigar, 'M')) {
+				currentLocation += cigarValue;
+				// cut cigar
+				cigar = cigar.substring(cigar.indexOf("M") + 1, cigar.length());
+				// if I is the next character, location of interest was shifted
+				// to the left
+				// add to adjustment the amount that would affect the location
+				// of interest
+			} else if (nextChar(cigar, 'I')) {
+				if((currentLocation+cigarValue) >= originalLocation){
+					while((currentLocation<=originalLocation) && (cigarValue > 0)){
+						adjustment++;
+						currentLocation++; 
+						cigarValue--; 
+					}
+				} else {
+					adjustment+= cigarValue;
+					currentLocation+=cigarValue; 
+				}
+
+				// cut cigar string
+				cigar = cigar.substring(cigar.indexOf("I") + 1, cigar.length());
+				// if D is the next character, location of interest was shifted
+				// to the right
+				// negate from adjustment the amount that would affect the
+				// location of interest
+			} else if (nextChar(cigar, 'D')) { 
+				if((currentLocation+cigarValue)>=originalLocation){
+					adjustment = 101; 
+				}else {
+					adjustment-=cigarValue;
+					currentLocation+=cigarValue; 
+				}
+				// cut cigar string
+				cigar = cigar.substring(cigar.indexOf("D") + 1, cigar.length());
+				// if D is the next character, location of interest was shifted
+				// to the right
+				// negate from adjustment the amount that would affect the
+				// location of interest
+			} else if (nextChar(cigar, 'S')) {
+				if ((adjustment + cigarValue) < 100) {
+					adjustment += cigarValue;
+				} else {
+					while ((cigarValue > 0 && (currentLocation < 100))) {
+						adjustment++;
+						cigarValue--;
+						currentLocation++;
+					}
+				}
+
+				// cut cigar string
+				cigar = cigar.substring(cigar.indexOf("S") + 1, cigar.length());
+			}
+		}
+		if(deletionRanges.contains(originalLocation+adjustment)){
+			adjustment = 101; 
+		} 
+		
+		if((var=='I') && (insertionRanges.contains(originalLocation+adjustment-1))){
+			adjustment = -101; 
+		}
+		deletionRanges = null; 
+		insertionRanges = null;  
+		return adjustment;
+
+	}
+	
+	/**
+	 * Given a variant (intended use: insertion/deletion) and a string cigar,
+	 * will find ranges on read where variant occurs 
+	 * @param var the variant
+	 * @param cigar the cigar string from read
+	 * @return list of ranges 
+	 */
+	private static ArrayList<Integer> findRange(char var, String cigar){
+		ArrayList<Integer> ranges = new ArrayList<Integer>(); 
+		int inc = -1; 
+		while(cigar.length()>0){
+			int cigarValue = findLocation(cigar);
+			if(!nextChar(cigar, var)){
+				inc += cigarValue;
+				cigar = cigar.substring(cigar.indexOf(findFirstChar(cigar)) + 1, cigar.length());
+			} else if(nextChar(cigar, var)){
+				while(cigarValue>0){
+					ranges.add(inc+1);
+					cigarValue--; 
+					inc++; 
+				}
+				inc+=cigarValue;
+				cigar = cigar.substring(cigar.indexOf(var) + 1, cigar.length());
+			}
+		}
+		
+		return ranges; 
+	}
+	
+	/**
+	 * Given a string, returns the first number value before any character is
+	 * found
+	 * 
+	 * @param name
+	 *            the string
+	 * @return the value in the cigar
+	 */
+	private static int findLocation(String name) {
+		char[] chars = name.toCharArray();
+		int i = 0;
+		for (char c : chars) {
+			if (!Character.isLetter(c)) {
+				i++;
+			} else {
+				break;
+			}
+		}
+		int location = (Integer.parseInt(name.substring(0, i)));
+		return location;
+	}
+
+	/**
+	 * Given a string, will determine if the next character in the string is the
+	 * char of interest
+	 * 
+	 * @param name
+	 *            the string to search through
+	 * @param c
+	 *            char of interest
+	 * @return if c next char in string
+	 */
+	private static boolean nextChar(String name, char c) {
+		char[] chars = name.toCharArray();
+		ArrayList<Character> letters = new ArrayList<Character>();
+		for (char x : chars) {
+			if (Character.isLetter(x)) {
+				letters.add(x);
+			}
+		}
+		if ((letters.size() == 0) || (letters.get(0) != c)) {
+			return false;
+		}
+		return true;
+	}
+	
+	/**
+	 * Given a string, returns the first char 
+	 * @param name
+	 * @return
+	 */
+	private static char findFirstChar(String name) {
+		char[] chars = name.toCharArray();
+		ArrayList<Character> letters = new ArrayList<Character>();
+		for (char x : chars) {
+			if (Character.isLetter(x)) {
+				letters.add(x);
+			}
+		}
+		return (letters.get(0));
+	}
+
+	/**
+	 * MasterList contains PhasedContainers which contain a list of
+	 * Variant(variant, location and chromosome) that are in phase and the
+	 * SAMRecords that contain the variants. If a PhasedContainer has a
+	 * Variant that matches a Variant in another PhasedContainer, all are in
+	 * phase and are merged together into one Record Container.
+	 * 
+	 * @param i
+	 *            index of PhasedContainer
+	 * @param j
+	 *            index of a PhasedContainer in phase with PhasedContainer at
+	 *            spot i
+	 */
+	private static void merge(int i, int j) {
+		for (Variant hold : PhasedListContainer.get(j).getVarList()) {
+			if (!PhasedListContainer.get(i).getVarList().contains(hold)) {
+				PhasedListContainer.get(i).addToVarList(hold);
+			}
+		}
+		for (SAMRecord record : PhasedListContainer.get(j).getReadList()) {
+			if (!(PhasedListContainer.get(i).getReadList().contains(record))) {
+				PhasedListContainer.get(i).addToReadList(record);
+			}
+		}
+		PhasedListContainer.remove(j);
+	}
+}
+
